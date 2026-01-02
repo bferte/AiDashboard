@@ -1,18 +1,7 @@
 fastapi
-<<<<<<< HEAD
 uvicorn
 pydantic
 langchain-community
 faiss-cpu
 sentence-transformers
-=======
-uvicorn[standard]
-faiss-cpu
-langchain
-langchain-community
-beautifulsoup4
-lxml
-pypdf
-requests
-
->>>>>>> 01b27de (Preparation pour synchronisation avec Jules)
+pandas
