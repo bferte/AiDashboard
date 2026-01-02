@@ -4,3 +4,4 @@ pydantic
 langchain-community
 faiss-cpu
 sentence-transformers
+pandas
