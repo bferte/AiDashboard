@@ -17,3 +17,9 @@ ENV/
 # Fichiers de l'éditeur
 .vscode/
 .idea/
+
+# Artefacts générés par le script d'ingestion
+faiss_index/
+figures/
+emissions.csv
+*.csv.bak

@@ -1,7 +1,12 @@
 fastapi
 uvicorn
 pydantic
+pandas
+langchain
 langchain-community
+langchain-text-splitters
 faiss-cpu
 sentence-transformers
-pandas
+unstructured[all-docs]
+ollama
+codecarbon

@@ -1,54 +1,18 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama
 from fastapi.middleware.cors import CORSMiddleware
 import os
-from contextlib import asynccontextmanager
+import time
 
-# Import du nouveau module d'analyse
-import optique_analytics as analytics
-
-# --- CONFIGURATION ---
+# Configuration des chemins
 INDEX_PATH = "index/faiss_index"
-STATIC_DIR = "static"
-model_cache = {}
 
-# --- CYCLE DE VIE DE L'APPLICATION (LIFESPAN) ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("Démarrage de l'API et chargement des modèles...")
-    model_cache["embeddings"] = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    if os.path.exists(INDEX_PATH):
-        model_cache["db"] = FAISS.load_local(
-            INDEX_PATH,
-            model_cache["embeddings"],
-            allow_dangerous_deserialization=True
-        )
-        model_cache["rag_ready"] = True
-        print("✅ Modèles RAG chargés.")
-    else:
-        model_cache["db"] = None
-        model_cache["rag_ready"] = False
-        print("⚠️ Attention : Index FAISS introuvable.")
-    yield
-    print("Arrêt de l'API...")
-    model_cache.clear()
+app = FastAPI(title="Mon RAG Local Gratuit")
 
-# --- INITIALISATION DE L'APPLICATION FASTAPI ---
-app = FastAPI(
-    title="AI Dashboard Optique",
-    lifespan=lifespan,
-    description="API pour le tableau de bord de pilotage d'un magasin d'optique."
-)
-
-if not os.path.exists(STATIC_DIR):
-    os.makedirs(STATIC_DIR)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
+# Configuration indispensable pour le HTML/JS (CORS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -56,70 +20,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- MODÈLES DE DONNÉES (PYDANTIC) ---
-class AnalyseRequest(BaseModel):
-    nom_collaborateur: str
+# 1. Chargement des outils au démarrage
+print("Chargement des embeddings et de l'index FAISS...")
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+# Chargement de la base vectorielle
+if os.path.exists(INDEX_PATH):
+    db = FAISS.load_local(INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+else:
+    print("⚠️ Attention : Index FAISS introuvable. Lancez d'abord ingest.py")
+
+class Ask(BaseModel):
+    question: str
     model_name: str = "mistral:instruct"
+    top_k: int = 4
 
-# --- ROUTES ---
-@app.get("/", include_in_schema=False)
-async def read_index():
-    return FileResponse(os.path.join(STATIC_DIR, 'index.html'))
+@app.get("/")
+def read_root():
+    return {"status": "L'API RAG est en ligne !"}
 
-@app.get("/api/collaborateurs", summary="Liste des collaborateurs")
-def get_collaborateurs():
-    return analytics.get_collaborateurs_list()
+@app.post("/ask")
+def ask(payload: Ask):
+    start_time = time.time()
 
-@app.get("/api/kpi-data/{nom_collaborateur}", summary="Données KPI d'un collaborateur")
-def get_kpi_data(nom_collaborateur: str):
-    collaborateur_data = analytics.get_collaborateur_data(nom_collaborateur)
-    if not collaborateur_data:
-        raise HTTPException(status_code=404, detail=f"Collaborateur '{nom_collaborateur}' non trouvé.")
-    store_average = analytics.get_store_average()
-    return {
-        "collaborateur": collaborateur_data,
-        "moyenne_magasin": store_average
-    }
+    # --- ÉTAPE 1 : RETRIEVAL (Récupération avec Score) ---
+    # On utilise similarity_search_with_score pour obtenir la distance L2
+    docs_and_scores = db.similarity_search_with_score(payload.question, k=payload.top_k)
 
-@app.post("/api/analyze-collaborateur", summary="Génère un plan de coaching IA")
-async def analyze_collaborateur(payload: AnalyseRequest):
-    if not model_cache.get("rag_ready", False):
-        raise HTTPException(status_code=503, detail="Service RAG non prêt.")
+    # Calcul d'un score de pertinence (Inverse de la distance)
+    # Plus la distance est proche de 0, plus le score est proche de 100%
+    if docs_and_scores:
+        avg_distance = sum([score for _, score in docs_and_scores]) / len(docs_and_scores)
+        # Normalisation arbitraire pour le confort visuel (la distance L2 peut varier)
+        relevance_score = max(0, min(100, 100 - (avg_distance * 50)))
+    else:
+        relevance_score = 0
 
-    nom = payload.nom_collaborateur
-    collaborateur_data = analytics.get_collaborateur_data(nom)
-    store_average = analytics.get_store_average()
-
-    kpi_collab = collaborateur_data.get("Taux_2eme_Paire_VA", 0)
-    kpi_moyenne = store_average.get("Taux_2eme_Paire_VA", 0)
-
-    prompt_data = (
-        f"Voici les chiffres de {nom}. "
-        f"Il est à {kpi_collab}% sur la 2ème paire VA (Moyenne : {kpi_moyenne}%). "
-        "En utilisant les procédures de vente dans nos PDF, propose un plan d'action de coaching précis."
+    # Construction du contexte pour le LLM
+    context_text = "\n\n---\n\n".join(
+        [f"Source: {os.path.basename(doc.metadata['source'])}\n{doc.page_content}" for doc, score in docs_and_scores]
     )
 
-    db = model_cache["db"]
-    # Utilisation de la méthode asynchrone pour la recherche
-    docs = await db.asimilarity_search(prompt_data, k=3)
-    context_text = "\n\n---\n\n".join([doc.page_content for doc in docs])
+    # --- ÉTAPE 2 : GÉNÉRATION (LLM) ---
+    prompt = f"""
+    Tu es un assistant expert. Réponds à la question suivante en utilisant UNIQUEMENT le contexte fourni ci-dessous.
+    Si la réponse n'est pas dans le contexte, dis que tu ne sais pas.
+    Cite les sources à la fin de ta réponse.
 
-    final_prompt = f"""
-    Tu es un coach expert pour les professionnels de l'optique.
-    Utilise le contexte suivant pour formuler ta réponse.
-    Contexte: {context_text}
-    Question: {prompt_data}
-    Réponse:
+    Contexte :
+    {context_text}
+
+    Question :
+    {payload.question}
+
+    Réponse :
     """
 
-    try:
-        llm = Ollama(model=payload.model_name)
-        # Utilisation de la méthode asynchrone pour l'invocation
-        answer = await llm.ainvoke(final_prompt)
+    # Initialisation du modèle choisi
+    llm = Ollama(model=payload.model_name)
 
-        return {"answer": answer}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur LLM : {e}")
+    # On mesure le temps de génération uniquement
+    gen_start = time.time()
+    answer = llm.invoke(prompt)
+    gen_duration = time.time() - gen_start
+
+    # --- ÉTAPE 3 : CALCUL DES KPI ---
+    total_duration = time.time() - start_time
+
+    # Estimation des tokens : 1 mot ≈ 1.3 tokens
+    words = len(answer.split())
+    tokens_estimate = words * 1.3
+    tps = round(tokens_estimate / gen_duration, 2) if gen_duration > 0 else 0
+
+    return {
+        "answer": answer,
+        "sources": list(set([os.path.basename(doc.metadata['source']) for doc, score in docs_and_scores])),
+        "relevance": float(round(relevance_score, 2)), # Ajout de float()
+        "tps": float(tps),                            # Ajout de float()
+        "duration": float(round(total_duration, 2))    # Ajout de float()
+    }
 
 if __name__ == "__main__":
     import uvicorn
