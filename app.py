@@ -1,104 +1,122 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
+import time
+from typing import Any, Dict, Optional
+
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.llms import Ollama
-from fastapi.middleware.cors import CORSMiddleware
+# from langchain_community.llms import Ollama # Import réel
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import Runnable, RunnableConfig, RunnablePassthrough, RunnableLambda
+from langchain_core.output_parsers import StrOutputParser
+
 import os
-import time
 
-# Configuration des chemins
-INDEX_PATH = "index/faiss_index"
+# --- Configuration ---
+INDEX_PATH = "faiss_index"
+MODEL_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
+# MODEL_LLM = "mistral:instruct" # Modèle réel
 
-app = FastAPI(title="Mon RAG Local Gratuit")
+model_cache = {}
 
-# Configuration indispensable pour le HTML/JS (CORS)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- Simulation du LLM (Compatible avec LangChain) ---
+class MockOllama(Runnable):
+    """Un LLM simulé qui gère correctement les entrées de la chaîne LCEL."""
+    def invoke(self, input: Any, config: Optional[RunnableConfig] = None) -> str:
+        print("INFO: Appel simulé du LLM.")
+        # Convertir l'entrée (qui peut être un ChatPromptValue) en chaîne de caractères
+        prompt_str = str(input)
 
-# 1. Chargement des outils au démarrage
-print("Chargement des embeddings et de l'index FAISS...")
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        question_marker = "Question :"
+        question_index = prompt_str.rfind(question_marker) # Utiliser rfind pour trouver la dernière occurrence
+        question = prompt_str[question_index + len(question_marker):].strip() if question_index != -1 else "inconnue"
 
-# Chargement de la base vectorielle
-if os.path.exists(INDEX_PATH):
-    db = FAISS.load_local(INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
-else:
-    print("⚠️ Attention : Index FAISS introuvable. Lancez d'abord ingest.py")
+        time.sleep(1) # Simuler un délai de génération
+        return f"[Réponse simulée du RAG pour la question : '{question}']"
 
-class Ask(BaseModel):
-    question: str
-    model_name: str = "mistral:instruct"
-    top_k: int = 4
+# --- Gestionnaire Lifespan ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Chargement des modèles et de l'index FAISS...")
+    embeddings = HuggingFaceEmbeddings(model_name=MODEL_EMBEDDING)
 
-@app.get("/")
-def read_root():
-    return {"status": "L'API RAG est en ligne !"}
-
-@app.post("/ask")
-def ask(payload: Ask):
-    start_time = time.time()
-
-    # --- ÉTAPE 1 : RETRIEVAL (Récupération avec Score) ---
-    # On utilise similarity_search_with_score pour obtenir la distance L2
-    docs_and_scores = db.similarity_search_with_score(payload.question, k=payload.top_k)
-
-    # Calcul d'un score de pertinence (Inverse de la distance)
-    # Plus la distance est proche de 0, plus le score est proche de 100%
-    if docs_and_scores:
-        avg_distance = sum([score for _, score in docs_and_scores]) / len(docs_and_scores)
-        # Normalisation arbitraire pour le confort visuel (la distance L2 peut varier)
-        relevance_score = max(0, min(100, 100 - (avg_distance * 50)))
+    if os.path.exists(INDEX_PATH):
+        db = FAISS.load_local(INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+        model_cache["retriever"] = db.as_retriever(search_kwargs={'k': 5})
+        print("Index FAISS chargé avec succès.")
     else:
-        relevance_score = 0
+        print(f"AVERTISSEMENT: Index FAISS non trouvé.")
+        model_cache["retriever"] = None
 
-    # Construction du contexte pour le LLM
-    context_text = "\n\n---\n\n".join(
-        [f"Source: {os.path.basename(doc.metadata['source'])}\n{doc.page_content}" for doc, score in docs_and_scores]
-    )
+    # Utiliser le LLM simulé. Pour le réel, changez la ligne ci-dessous par:
+    # from langchain_community.llms import Ollama
+    # model_cache["llm"] = Ollama(model=MODEL_LLM)
+    model_cache["llm"] = MockOllama()
+    print("Chargement terminé.")
 
-    # --- ÉTAPE 2 : GÉNÉRATION (LLM) ---
-    prompt = f"""
-    Tu es un assistant expert. Réponds à la question suivante en utilisant UNIQUEMENT le contexte fourni ci-dessous.
-    Si la réponse n'est pas dans le contexte, dis que tu ne sais pas.
-    Cite les sources à la fin de ta réponse.
+    yield
 
+    print("Nettoyage des ressources...")
+    model_cache.clear()
+
+app = FastAPI(lifespan=lifespan)
+
+class QueryRequest(BaseModel):
+    question: str
+
+class QueryResponse(BaseModel):
+    answer: str
+    sources: list[str]
+
+# --- Chaîne RAG ---
+def setup_rag_chain():
+    prompt_template = """
     Contexte :
-    {context_text}
+    {context}
 
     Question :
-    {payload.question}
-
-    Réponse :
+    {question}
     """
+    prompt = ChatPromptTemplate.from_template(prompt_template)
 
-    # Initialisation du modèle choisi
-    llm = Ollama(model=payload.model_name)
+    def format_docs(docs):
+        return "\n\n---\n\n".join(
+            f"Source: {os.path.basename(doc.metadata.get('source', 'Inconnue'))}\n{doc.page_content}"
+            for doc in docs
+        )
 
-    # On mesure le temps de génération uniquement
-    gen_start = time.time()
-    answer = llm.invoke(prompt)
-    gen_duration = time.time() - gen_start
+    rag_chain = (
+        {"context": model_cache["retriever"] | RunnableLambda(format_docs), "question": RunnablePassthrough()}
+        | prompt
+        | model_cache["llm"]
+    )
+    return rag_chain
 
-    # --- ÉTAPE 3 : CALCUL DES KPI ---
-    total_duration = time.time() - start_time
+def get_sources(docs):
+    return list(set(os.path.basename(doc.metadata.get('source', 'Inconnue')) for doc in docs))
 
-    # Estimation des tokens : 1 mot ≈ 1.3 tokens
-    words = len(answer.split())
-    tokens_estimate = words * 1.3
-    tps = round(tokens_estimate / gen_duration, 2) if gen_duration > 0 else 0
+@app.post("/api/query", response_model=QueryResponse)
+async def query_rag(request: QueryRequest):
+    if model_cache.get("retriever") is None:
+        return QueryResponse(answer="Erreur: Index FAISS non chargé.", sources=[])
 
-    return {
-        "answer": answer,
-        "sources": list(set([os.path.basename(doc.metadata['source']) for doc, score in docs_and_scores])),
-        "relevance": float(round(relevance_score, 2)), # Ajout de float()
-        "tps": float(tps),                            # Ajout de float()
-        "duration": float(round(total_duration, 2))    # Ajout de float()
-    }
+    retrieved_docs = model_cache["retriever"].invoke(request.question)
+
+    rag_chain = setup_rag_chain()
+    answer = rag_chain.invoke(request.question)
+
+    sources = get_sources(retrieved_docs)
+
+    return QueryResponse(answer=answer, sources=sources)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def serve_index():
+    return FileResponse('static/index.html')
 
 if __name__ == "__main__":
     import uvicorn
