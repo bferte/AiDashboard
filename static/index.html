@@ -5,36 +5,49 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Copilote RAG</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // Ce script est crucial. Il s'exécute avant le rendu pour éviter le "flash" du mauvais thème.
+        if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+        } else {
+            document.documentElement.classList.remove('dark');
+        }
+    </script>
 </head>
-<body class="bg-gray-100 font-sans">
+<body class="bg-white dark:bg-black font-sans transition-colors duration-300">
     <div class="container mx-auto p-4 sm:p-6 md:p-8 flex flex-col h-screen">
-        <div class="bg-white shadow-lg rounded-lg max-w-3xl w-full mx-auto flex flex-col flex-1">
-            <div class="p-4 border-b border-gray-200">
-                <h1 class="text-2xl sm:text-3xl font-bold text-gray-800 text-center">Copilote IA</h1>
-                <p class="text-gray-600 text-center mt-1">Posez une question sur vos documents ou discutez avec le LLM.</p>
+        <div class="bg-white dark:bg-[#111111] border border-[#EAEAEA] dark:border-[#333333] shadow-lg rounded-[8px] max-w-3xl w-full mx-auto flex flex-col flex-1">
+            <div class="relative p-4 border-b border-[#EAEAEA] dark:border-[#333333]">
+                <h1 class="text-2xl sm:text-3xl font-bold text-black dark:text-[#EDEDED] text-center">Copilote IA</h1>
+                <p class="text-gray-600 dark:text-zinc-400 text-center mt-1">Posez une question sur vos documents ou discutez avec le LLM.</p>
 
-                <div class="flex items-center justify-center space-x-2 mt-4">
-                    <span class="text-sm font-medium text-gray-700">Chat Direct</span>
-                    <label for="rag-toggle" class="relative inline-flex items-center cursor-pointer">
-                        <input type="checkbox" id="rag-toggle" class="sr-only peer" checked>
-                        <div class="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-4 peer-focus:ring-blue-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                    </label>
-                    <span class="text-sm font-medium text-gray-700">Utiliser le RAG</span>
-                </div>
+                <button id="theme-toggle" class="absolute top-4 right-4 p-2 rounded-[8px] focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <svg id="theme-toggle-dark-icon" class="hidden h-5 w-5 text-gray-800 dark:text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+                    <svg id="theme-toggle-light-icon" class="hidden h-5 w-5 text-gray-800 dark:text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                </button>
             </div>
 
-            <div id="chat-history" class="flex-1 p-4 overflow-y-auto bg-gray-50">
+            <div class="flex items-center justify-center space-x-2 py-3 border-b border-[#EAEAEA] dark:border-[#333333]">
+                <span class="text-sm font-medium text-black dark:text-zinc-400">Chat Direct</span>
+                <label for="rag-toggle" class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" id="rag-toggle" class="sr-only peer" checked>
+                    <div class="w-11 h-6 bg-gray-200 dark:bg-[#333333] rounded-full peer peer-focus:ring-4 peer-focus:ring-blue-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+                <span class="text-sm font-medium text-black dark:text-zinc-400">Utiliser le RAG</span>
+            </div>
+
+            <div id="chat-history" class="flex-1 p-4 overflow-y-auto bg-white dark:bg-black">
                 <div class="flex justify-start mb-2">
-                    <div class="p-3 rounded-lg bg-blue-100 text-gray-800 max-w-lg">
-                        Bonjour ! Comment puis-je vous aider aujourd'hui ?
+                    <div class="p-3 rounded-[8px] bg-gray-100 dark:bg-[#333333] text-black dark:text-[#EDEDED] max-w-lg">
+                        Bonjour ! Choisissez un thème et posez-moi une question.
                     </div>
                 </div>
             </div>
 
-            <div class="p-4 border-t border-gray-200 bg-white">
+            <div class="p-4 border-t border-[#EAEAEA] dark:border-[#333333] bg-white dark:bg-[#111111]">
                 <div class="flex space-x-2">
-                    <textarea id="question-input" class="flex-1 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Posez votre question..."></textarea>
-                    <button id="submit-btn" class="bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-300 flex items-center justify-center">
+                    <textarea id="question-input" class="flex-1 p-2 bg-white dark:bg-black border border-[#EAEAEA] dark:border-[#333333] rounded-[8px] text-black dark:text-[#EDEDED] focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Posez votre question..."></textarea>
+                    <button id="submit-btn" class="bg-blue-600 text-white font-semibold py-2 px-4 rounded-[8px] hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-300 flex items-center justify-center">
                         <span id="btn-text">Envoyer</span>
                         <svg id="btn-loader" class="animate-spin ml-2 h-5 w-5 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -47,6 +60,10 @@
     </div>
 
     <script>
+        // --- DOM Elements ---
+        const themeToggleBtn = document.getElementById('theme-toggle');
+        const darkIcon = document.getElementById('theme-toggle-dark-icon');
+        const lightIcon = document.getElementById('theme-toggle-light-icon');
         const questionInput = document.getElementById('question-input');
         const submitBtn = document.getElementById('submit-btn');
         const btnText = document.getElementById('btn-text');
@@ -54,6 +71,24 @@
         const chatHistoryContainer = document.getElementById('chat-history');
         const ragToggle = document.getElementById('rag-toggle');
 
+        // --- Theme Logic ---
+        const updateThemeIcons = () => {
+            if (document.documentElement.classList.contains('dark')) {
+                lightIcon.classList.remove('hidden');
+                darkIcon.classList.add('hidden');
+            } else {
+                lightIcon.classList.add('hidden');
+                darkIcon.classList.remove('hidden');
+            }
+        };
+
+        themeToggleBtn.addEventListener('click', () => {
+            const isDark = document.documentElement.classList.toggle('dark');
+            localStorage.theme = isDark ? 'dark' : 'light';
+            updateThemeIcons();
+        });
+
+        // --- Chat Logic ---
         let chatHistory = [];
 
         const addMessageToHistory = (role, content) => {
@@ -61,7 +96,7 @@
             messageDiv.classList.add('flex', 'mb-3');
 
             const contentDiv = document.createElement('div');
-            contentDiv.classList.add('p-3', 'rounded-lg', 'max-w-lg');
+            contentDiv.classList.add('p-3', 'rounded-[8px]', 'max-w-lg', 'whitespace-pre-wrap');
             contentDiv.textContent = content;
 
             if (role === 'human') {
@@ -69,7 +104,7 @@
                 contentDiv.classList.add('bg-blue-500', 'text-white');
             } else {
                 messageDiv.classList.add('justify-start');
-                contentDiv.classList.add('bg-gray-200', 'text-gray-800');
+                contentDiv.classList.add('bg-gray-100', 'dark:bg-[#333333]', 'text-black', 'dark:text-[#EDEDED]');
             }
 
             messageDiv.appendChild(contentDiv);
@@ -95,7 +130,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         question: question,
-                        history: chatHistory.slice(0, -1), // Envoyer l'historique SANS la question actuelle
+                        history: chatHistory.slice(0, -1),
                         use_rag: ragToggle.checked
                     }),
                 });
@@ -110,7 +145,7 @@
                 }
 
                 addMessageToHistory('ai', answer);
-                chatHistory.push({ role: 'ai', content: data.answer }); // Stocker la réponse brute sans les sources
+                chatHistory.push({ role: 'ai', content: data.answer });
 
             } catch (error) {
                 console.error("Erreur:", error);
@@ -123,13 +158,18 @@
             }
         };
 
-        submitBtn.addEventListener('click', handleQuery);
-        questionInput.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                handleQuery();
-            }
+        // --- Initialisation ---
+        document.addEventListener('DOMContentLoaded', () => {
+            updateThemeIcons(); // Mettre à jour l'icône au chargement
+            submitBtn.addEventListener('click', handleQuery);
+            questionInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    handleQuery();
+                }
+            });
         });
+
     </script>
 </body>
 </html>
