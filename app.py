@@ -4,38 +4,36 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
-# from langchain_community.llms import Ollama # Import réel
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.llms import Ollama
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import Runnable, RunnableConfig, RunnablePassthrough, RunnableLambda
-from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import AIMessage, HumanMessage
 
 import os
 
 # --- Configuration ---
 INDEX_PATH = "faiss_index"
 MODEL_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
-# MODEL_LLM = "mistral:instruct" # Modèle réel
+MODEL_LLM = "mistral:instruct" # Assurez-vous que ce modèle est disponible via Ollama
+USE_MOCK_LLM = False # Mettre à True pour utiliser la simulation sans Ollama
 
 model_cache = {}
 
-# --- Simulation du LLM (Compatible avec LangChain) ---
+# --- Simulation du LLM (pour le développement) ---
 class MockOllama(Runnable):
-    """Un LLM simulé qui gère correctement les entrées de la chaîne LCEL."""
     def invoke(self, input: Any, config: Optional[RunnableConfig] = None) -> str:
         print("INFO: Appel simulé du LLM.")
-        # Convertir l'entrée (qui peut être un ChatPromptValue) en chaîne de caractères
         prompt_str = str(input)
-
-        question_marker = "Question :"
-        question_index = prompt_str.rfind(question_marker) # Utiliser rfind pour trouver la dernière occurrence
+        question_marker = "Human:"
+        question_index = prompt_str.rfind(question_marker)
         question = prompt_str[question_index + len(question_marker):].strip() if question_index != -1 else "inconnue"
 
-        time.sleep(1) # Simuler un délai de génération
-        return f"[Réponse simulée du RAG pour la question : '{question}']"
+        time.sleep(1)
+        return f"[Réponse simulée pour la question : '{question.replace('}', '')}']"
 
 # --- Gestionnaire Lifespan ---
 @asynccontextmanager
@@ -45,73 +43,93 @@ async def lifespan(app: FastAPI):
 
     if os.path.exists(INDEX_PATH):
         db = FAISS.load_local(INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
-        model_cache["retriever"] = db.as_retriever(search_kwargs={'k': 5})
-        print("Index FAISS chargé avec succès.")
+        model_cache["retriever"] = db.as_retriever(search_kwargs={'k': 3})
+        print("Index FAISS chargé.")
     else:
-        print(f"AVERTISSEMENT: Index FAISS non trouvé.")
+        print("AVERTISSEMENT: Index FAISS non trouvé.")
         model_cache["retriever"] = None
 
-    # Utiliser le LLM simulé. Pour le réel, changez la ligne ci-dessous par:
-    # from langchain_community.llms import Ollama
-    # model_cache["llm"] = Ollama(model=MODEL_LLM)
-    model_cache["llm"] = MockOllama()
+    if USE_MOCK_LLM:
+        print("Utilisation du LLM simulé.")
+        model_cache["llm"] = MockOllama()
+    else:
+        print(f"Utilisation du LLM réel : {MODEL_LLM}")
+        model_cache["llm"] = Ollama(model=MODEL_LLM)
+
     print("Chargement terminé.")
-
     yield
-
     print("Nettoyage des ressources...")
     model_cache.clear()
 
 app = FastAPI(lifespan=lifespan)
 
+# --- Modèles Pydantic ---
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
 class QueryRequest(BaseModel):
     question: str
+    history: List[ChatMessage]
+    use_rag: bool
 
 class QueryResponse(BaseModel):
     answer: str
-    sources: list[str]
+    sources: List[str]
 
-# --- Chaîne RAG ---
-def setup_rag_chain():
-    prompt_template = """
-    Contexte :
-    {context}
-
-    Question :
-    {question}
-    """
-    prompt = ChatPromptTemplate.from_template(prompt_template)
-
-    def format_docs(docs):
-        return "\n\n---\n\n".join(
-            f"Source: {os.path.basename(doc.metadata.get('source', 'Inconnue'))}\n{doc.page_content}"
-            for doc in docs
-        )
-
-    rag_chain = (
-        {"context": model_cache["retriever"] | RunnableLambda(format_docs), "question": RunnablePassthrough()}
-        | prompt
-        | model_cache["llm"]
+# --- Chaîne RAG & Chat ---
+def format_docs(docs):
+    return "\n\n---\n\n".join(
+        f"Source: {os.path.basename(doc.metadata.get('source', 'Inconnue'))}\n{doc.page_content}"
+        for doc in docs
     )
-    return rag_chain
 
 def get_sources(docs):
     return list(set(os.path.basename(doc.metadata.get('source', 'Inconnue')) for doc in docs))
 
 @app.post("/api/query", response_model=QueryResponse)
 async def query_rag(request: QueryRequest):
-    if model_cache.get("retriever") is None:
-        return QueryResponse(answer="Erreur: Index FAISS non chargé.", sources=[])
+    chat_history = [AIMessage(content=msg.content) if msg.role == 'ai' else HumanMessage(content=msg.content) for msg in request.history]
 
-    retrieved_docs = model_cache["retriever"].invoke(request.question)
+    if request.use_rag and model_cache.get("retriever"):
+        print("Mode RAG activé.")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "Tu es un assistant expert. Réponds à la question en te basant sur le contexte suivant et l'historique de la conversation. Cite tes sources à la fin."),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("user", "Contexte:\n{context}\n\nQuestion: {question}")
+        ])
 
-    rag_chain = setup_rag_chain()
-    answer = rag_chain.invoke(request.question)
+        retriever = model_cache["retriever"]
+        retrieved_docs = retriever.invoke(request.question)
+        context = format_docs(retrieved_docs)
+        sources = get_sources(retrieved_docs)
 
-    sources = get_sources(retrieved_docs)
+        chain = prompt | model_cache["llm"]
+        response = chain.invoke({
+            "context": context,
+            "question": request.question,
+            "chat_history": chat_history
+        })
 
-    return QueryResponse(answer=answer, sources=sources)
+        return QueryResponse(answer=response, sources=sources)
 
+    else:
+        print("Mode Chat Direct activé.")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "Tu es un assistant conversationnel. Réponds directement à la question en tenant compte de l'historique de la conversation."),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("user", "{question}")
+        ])
+
+        chain = prompt | model_cache["llm"]
+        response = chain.invoke({
+            "question": request.question,
+            "chat_history": chat_history
+        })
+
+        return QueryResponse(answer=response, sources=[])
+
+# --- Servir le Frontend ---
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
